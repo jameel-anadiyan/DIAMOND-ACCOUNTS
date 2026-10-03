@@ -1,0 +1,8 @@
+node_modules/
+diamond-app/node_modules/
+dist/
+diamond-app/dist/
+.DS_Store
+*.log
+.env
+.env.local
