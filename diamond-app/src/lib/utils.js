@@ -41,3 +41,47 @@ export function statusColor(status) {
   if (status === 'OVERDUE' || status?.includes('OVERDUE')) return 'status-OVERDUE'
   return 'status-UNPAID'
 }
+
+export function getDaysLeft(dueDateStr, baseDateStr = new Date().toISOString().split('T')[0]) {
+  if (!dueDateStr) return { days: null, text: 'No due date', badgeClass: 'badge-grey', status: 'none', icon: '—' }
+  
+  const due = new Date(dueDateStr + 'T00:00:00')
+  const base = new Date(baseDateStr + 'T00:00:00')
+  const diffTime = due - base
+  const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24))
+
+  if (diffDays > 7) {
+    return {
+      days: diffDays,
+      text: `${diffDays} days left`,
+      badgeClass: 'badge-green',
+      status: 'upcoming',
+      icon: '⏳'
+    }
+  } else if (diffDays > 0) {
+    return {
+      days: diffDays,
+      text: `${diffDays} ${diffDays === 1 ? 'day' : 'days'} left`,
+      badgeClass: 'badge-yellow',
+      status: 'due_soon',
+      icon: '⚠️'
+    }
+  } else if (diffDays === 0) {
+    return {
+      days: 0,
+      text: 'Due Today',
+      badgeClass: 'badge-yellow',
+      status: 'today',
+      icon: '🚨'
+    }
+  } else {
+    const overdue = Math.abs(diffDays)
+    return {
+      days: diffDays,
+      text: `${overdue} ${overdue === 1 ? 'day' : 'days'} overdue`,
+      badgeClass: 'badge-red',
+      status: 'overdue',
+      icon: '🔴'
+    }
+  }
+}

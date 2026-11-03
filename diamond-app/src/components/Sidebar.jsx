@@ -4,6 +4,7 @@ export default function Sidebar({ page, setPage, onSignOut }) {
     { id: 'parties',   icon: '🏢', label: 'Suppliers' },
     { id: 'invoices',  icon: '📄', label: 'Invoices' },
     { id: 'payments',  icon: '💳', label: 'Payments' },
+    { id: 'selling',   icon: '💎', label: 'Selling Portal' },
     { id: 'ledger',    icon: '📒', label: 'Ledger' },
     { id: 'settings',  icon: '⚙️',  label: 'Settings' },
   ]

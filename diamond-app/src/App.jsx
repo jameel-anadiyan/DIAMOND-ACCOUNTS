@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard'
 import Parties from './pages/Parties'
 import Invoices from './pages/Invoices'
 import Payments from './pages/Payments'
+import SellingPortal from './pages/SellingPortal'
 import Ledger from './pages/Ledger'
 import Settings from './pages/Settings'
 import './index.css'
@@ -48,6 +49,7 @@ export default function App() {
     parties:   <Parties onNavigate={navigate} />,
     invoices:  <Invoices onNavigate={navigate} />,
     payments:  <Payments onNavigate={navigate} />,
+    selling:   <SellingPortal onNavigate={navigate} />,
     ledger:    <Ledger onNavigate={navigate} />,
     settings:  <Settings onNavigate={navigate} />,
   }
