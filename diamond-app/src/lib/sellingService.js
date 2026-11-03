@@ -84,6 +84,10 @@ export async function getSellingRecords() {
           supplier_name: item.supplier?.name || partyMap[item.supplier_id] || 'Unknown Supplier',
           supplier_balance: balanceMap[item.supplier_id] || 0,
           lines: rawLines,
+          subtotal_amount: item.subtotal_amount !== undefined ? Number(item.subtotal_amount) : Number(item.total_amount) || 0,
+          additional_charge: Number(item.additional_charge) || 0,
+          additional_charge_type: item.additional_charge_type || 'add',
+          additional_charge_label: item.additional_charge_label || null,
           payment_status: item.payment_status || (item.payment_type ? 'paid' : 'unpaid'),
           payment_type: item.payment_type || null,
         }
@@ -144,6 +148,10 @@ export async function getSellingRecords() {
       supplier_name: partyMap[item.supplier_id] || item.supplier_name || 'Unknown Supplier',
       supplier_balance: balanceMap[item.supplier_id] || 0,
       lines: rawLines,
+      subtotal_amount: item.subtotal_amount !== undefined ? Number(item.subtotal_amount) : Number(item.total_amount) || 0,
+      additional_charge: Number(item.additional_charge) || 0,
+      additional_charge_type: item.additional_charge_type || 'add',
+      additional_charge_label: item.additional_charge_label || null,
       payment_status: item.payment_status || (item.payment_type ? 'paid' : 'unpaid'),
       payment_type: item.payment_type || null,
     }
@@ -189,8 +197,12 @@ export async function saveSellingRecord(record, isEdit = false) {
       ]
 
   const totalQuantity = lines.reduce((s, l) => s + l.quantity, 0)
-  const totalAmount = lines.reduce((s, l) => s + l.amount, 0)
-  const primaryCaratRate = totalQuantity > 0 ? Number((totalAmount / totalQuantity).toFixed(2)) : 0
+  const subtotalAmount = lines.reduce((s, l) => s + l.amount, 0)
+  const additionalCharge = parseFloat(record.additional_charge) || 0
+  const additionalChargeType = record.additional_charge_type || 'add'
+  const signedAdjustment = additionalChargeType === 'deduct' ? -additionalCharge : additionalCharge
+  const finalTotal = Math.max(0, subtotalAmount + signedAdjustment)
+  const primaryCaratRate = totalQuantity > 0 ? Number((subtotalAmount / totalQuantity).toFixed(2)) : 0
 
   const finalRecord = {
     ...record,
@@ -198,7 +210,11 @@ export async function saveSellingRecord(record, isEdit = false) {
     lines,
     quantity: totalQuantity,
     carat_rate: primaryCaratRate,
-    total_amount: totalAmount,
+    subtotal_amount: subtotalAmount,
+    additional_charge: additionalCharge,
+    additional_charge_type: additionalChargeType,
+    additional_charge_label: record.additional_charge_label || null,
+    total_amount: finalTotal,
     selling_date: sellingDate,
     payment_status: record.payment_status || 'unpaid',
     payment_type: record.payment_type || null,

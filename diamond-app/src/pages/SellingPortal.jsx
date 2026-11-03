@@ -470,8 +470,21 @@ export default function SellingPortal({ onNavigate }) {
                           </td>
 
                           {/* Total Amount */}
-                          <td className="td-right td-mono" style={{ fontSize: 15, fontWeight: 800, color: 'var(--green-light)' }}>
-                            {formatINR(item.total_amount)}
+                          <td className="td-right td-mono">
+                            <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--green-light)' }}>
+                              {formatINR(item.total_amount)}
+                            </div>
+                            {item.additional_charge > 0 && (
+                              <div style={{
+                                fontSize: 11,
+                                fontWeight: 600,
+                                color: item.additional_charge_type === 'deduct' ? 'var(--red)' : 'var(--blue)',
+                                marginTop: 2
+                              }}>
+                                {item.additional_charge_type === 'deduct' ? '-' : '+'} {formatINR(item.additional_charge)}
+                                {item.additional_charge_label ? ` (${item.additional_charge_label})` : ''}
+                              </div>
+                            )}
                           </td>
 
                           {/* Due Date */}
@@ -636,6 +649,38 @@ export default function SellingPortal({ onNavigate }) {
                                       </tr>
                                     ))}
                                   </tbody>
+                                  <tfoot>
+                                    <tr style={{ borderTop: '1.5px solid var(--border)', background: 'var(--bg-card)' }}>
+                                      <td colSpan={2} style={{ padding: '8px 10px', fontWeight: 700, textAlign: 'right' }}>
+                                        Items Subtotal:
+                                      </td>
+                                      <td className="td-right td-mono" style={{ padding: '8px 10px', fontWeight: 700 }}>
+                                        {formatWeight(item.quantity)}
+                                      </td>
+                                      <td></td>
+                                      <td className="td-right td-mono" style={{ padding: '8px 10px', fontWeight: 700 }}>
+                                        {formatINR(item.subtotal_amount || item.total_amount)}
+                                      </td>
+                                    </tr>
+                                    {item.additional_charge > 0 && (
+                                      <tr style={{ background: 'var(--bg-card)' }}>
+                                        <td colSpan={4} style={{ padding: '6px 10px', fontWeight: 600, textAlign: 'right', color: item.additional_charge_type === 'deduct' ? 'var(--red)' : 'var(--blue)' }}>
+                                          {item.additional_charge_type === 'deduct' ? '➖ Deduction' : '➕ Additional Charge'} {item.additional_charge_label ? `(${item.additional_charge_label})` : ''}:
+                                        </td>
+                                        <td className="td-right td-mono" style={{ padding: '6px 10px', fontWeight: 700, color: item.additional_charge_type === 'deduct' ? 'var(--red)' : 'var(--blue)' }}>
+                                          {item.additional_charge_type === 'deduct' ? '-' : '+'} {formatINR(item.additional_charge)}
+                                        </td>
+                                      </tr>
+                                    )}
+                                    <tr style={{ borderTop: '1px solid var(--border)', background: 'var(--blue-bg)' }}>
+                                      <td colSpan={4} style={{ padding: '8px 10px', fontWeight: 800, textAlign: 'right', color: 'var(--accent)' }}>
+                                        Final Total Amount:
+                                      </td>
+                                      <td className="td-right td-mono" style={{ padding: '8px 10px', fontWeight: 900, fontSize: 14, color: 'var(--accent)' }}>
+                                        {formatINR(item.total_amount)}
+                                      </td>
+                                    </tr>
+                                  </tfoot>
                                 </table>
                               </div>
                             </td>

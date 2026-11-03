@@ -44,6 +44,17 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
     return [emptyLine(1)]
   })
 
+  // Additional Charge or Deduction
+  const [adjustmentType, setAdjustmentType] = useState(
+    existingSelling?.additional_charge_type || 'add'
+  )
+  const [adjustmentAmount, setAdjustmentAmount] = useState(
+    existingSelling?.additional_charge ? String(existingSelling.additional_charge) : ''
+  )
+  const [adjustmentLabel, setAdjustmentLabel] = useState(
+    existingSelling?.additional_charge_label || ''
+  )
+
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -95,9 +106,11 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
     setLines(prev => prev.filter((_, i) => i !== idx).map((l, i) => ({ ...l, line_no: i + 1 })))
   }
 
-  // Calculate totals across all lines
+  // Calculate totals across all lines and additional charge
   const totalQuantity = lines.reduce((s, l) => s + (parseFloat(l.quantity) || 0), 0)
-  const totalAmount = lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0)
+  const subtotalAmount = lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0)
+  const numAdjustment = parseFloat(adjustmentAmount) || 0
+  const finalTotalAmount = Math.max(0, subtotalAmount + (adjustmentType === 'deduct' ? -numAdjustment : numAdjustment))
 
   const selectedSupplier = parties.find(p => p.id === form.supplier_id)
   const daysLeftInfo = form.due_date ? getDaysLeft(form.due_date, today) : null
@@ -132,8 +145,12 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
           amount: parseFloat(l.amount) || Number((parseFloat(l.quantity) * parseFloat(l.carat_rate)).toFixed(2)),
         })),
         quantity: totalQuantity,
-        carat_rate: totalQuantity > 0 ? Number((totalAmount / totalQuantity).toFixed(2)) : 0,
-        total_amount: totalAmount,
+        carat_rate: totalQuantity > 0 ? Number((subtotalAmount / totalQuantity).toFixed(2)) : 0,
+        subtotal_amount: subtotalAmount,
+        additional_charge: numAdjustment,
+        additional_charge_type: adjustmentType,
+        additional_charge_label: adjustmentLabel.trim() || null,
+        total_amount: finalTotalAmount,
         remarks: form.remarks.trim() || null,
         payment_status: existingSelling?.payment_status || 'unpaid',
         payment_type: existingSelling?.payment_type || null,
@@ -340,6 +357,85 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
             </div>
           </div>
 
+          {/* Additional Charge / Deduction */}
+          <div style={{
+            background: 'var(--bg-elevated)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+            padding: '12px 16px',
+            marginBottom: 18
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+              <div style={{ fontWeight: 700, fontSize: 12.5, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary)' }}>
+                ⚙️ Additional Charge / Deduction
+              </div>
+              <div style={{ display: 'flex', gap: 4, background: 'white', padding: 2, borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
+                <button
+                  type="button"
+                  onClick={() => setAdjustmentType('add')}
+                  style={{
+                    padding: '4px 10px',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    borderRadius: 'var(--radius-sm)',
+                    border: 'none',
+                    cursor: 'pointer',
+                    background: adjustmentType === 'add' ? 'var(--accent)' : 'transparent',
+                    color: adjustmentType === 'add' ? 'white' : 'var(--text-muted)',
+                    transition: 'all 0.15s ease'
+                  }}
+                >
+                  ➕ Add Charge (+)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAdjustmentType('deduct')}
+                  style={{
+                    padding: '4px 10px',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    borderRadius: 'var(--radius-sm)',
+                    border: 'none',
+                    cursor: 'pointer',
+                    background: adjustmentType === 'deduct' ? 'var(--red)' : 'transparent',
+                    color: adjustmentType === 'deduct' ? 'white' : 'var(--text-muted)',
+                    transition: 'all 0.15s ease'
+                  }}
+                >
+                  ➖ Deduct Amount (-)
+                </button>
+              </div>
+            </div>
+
+            <div className="form-row">
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label" style={{ fontSize: 11 }}>
+                  {adjustmentType === 'add' ? 'Charge Amount to Add (₹)' : 'Deduction Amount to Deduct (₹)'}
+                </label>
+                <input
+                  className="input font-mono"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="0.00"
+                  value={adjustmentAmount}
+                  onChange={e => setAdjustmentAmount(e.target.value)}
+                />
+              </div>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label" style={{ fontSize: 11 }}>
+                  Reason / Label (Optional)
+                </label>
+                <input
+                  className="input"
+                  placeholder={adjustmentType === 'add' ? "e.g. Courier, Brokerage, Tax" : "e.g. Discount, Kasar, Round-off"}
+                  value={adjustmentLabel}
+                  onChange={e => setAdjustmentLabel(e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+
           {/* Live Automatic Calculation Card */}
           <div style={{
             background: 'var(--blue-bg)',
@@ -360,13 +456,21 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
               <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 3 }}>
                 <strong>{lines.length} {lines.length === 1 ? 'lot' : 'lots'}</strong> · Total Weight: <strong style={{ color: 'var(--accent)' }}>{formatWeight(totalQuantity)}</strong>
               </div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>
+                Items Subtotal: <strong>{formatINR(subtotalAmount)}</strong>
+                {numAdjustment > 0 && (
+                  <span style={{ marginLeft: 8, color: adjustmentType === 'add' ? 'var(--blue)' : 'var(--red)', fontWeight: 700 }}>
+                    {adjustmentType === 'add' ? `+ ${formatINR(numAdjustment)} (${adjustmentLabel || 'Charge'})` : `- ${formatINR(numAdjustment)} (${adjustmentLabel || 'Deduction'})`}
+                  </span>
+                )}
+              </div>
             </div>
             <div style={{ textAlign: 'right' }}>
               <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>
-                Total Sale Amount
+                Final Total Amount
               </div>
               <div style={{ fontSize: 24, fontWeight: 900, color: 'var(--accent)', fontFamily: 'JetBrains Mono, monospace' }}>
-                {formatINR(totalAmount)}
+                {formatINR(finalTotalAmount)}
               </div>
             </div>
           </div>
