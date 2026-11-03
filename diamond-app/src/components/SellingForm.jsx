@@ -1,7 +1,15 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
-import { formatINR, getDaysLeft } from '../lib/utils'
+import { formatINR, formatWeight, getDaysLeft } from '../lib/utils'
 import { saveSellingRecord } from '../lib/sellingService'
+
+const emptyLine = (n = 1) => ({
+  line_no: n,
+  description: '',
+  quantity: '',
+  carat_rate: '',
+  amount: '',
+})
 
 export default function SellingForm({ selling: existingSelling, onClose, onSaved }) {
   const isEdit = !!existingSelling
@@ -11,14 +19,31 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
   const [form, setForm] = useState({
     title:        existingSelling?.title        || '',
     supplier_id:  existingSelling?.supplier_id  || '',
-    quantity:     existingSelling?.quantity     || '',
-    carat_rate:   existingSelling?.carat_rate   || '',
-    total_amount: existingSelling?.total_amount || '',
     selling_date: existingSelling?.selling_date || today,
     due_date:     existingSelling?.due_date     || '',
-    payment_type: existingSelling?.payment_type || 'collected', // 'collected' | 'adjusted'
     remarks:      existingSelling?.remarks      || '',
   })
+
+  // Multiple quantity / line items
+  const [lines, setLines] = useState(() => {
+    if (existingSelling?.lines && existingSelling.lines.length > 0) {
+      return existingSelling.lines.map((l, i) => ({
+        line_no: i + 1,
+        description: l.description || '',
+        quantity: l.quantity ?? '',
+        carat_rate: l.carat_rate ?? '',
+        amount: l.amount ?? ((parseFloat(l.quantity) || 0) * (parseFloat(l.carat_rate) || 0)).toFixed(2),
+      }))
+    }
+    if (existingSelling?.quantity) {
+      const q = parseFloat(existingSelling.quantity) || ''
+      const r = parseFloat(existingSelling.carat_rate) || ''
+      const amt = existingSelling.total_amount ?? ((parseFloat(q) || 0) * (parseFloat(r) || 0)).toFixed(2)
+      return [{ line_no: 1, description: '', quantity: q, carat_rate: r, amount: amt }]
+    }
+    return [emptyLine(1)]
+  })
+
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -31,31 +56,10 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
 
   const setF = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
-  function handleQuantityChange(val) {
-    const q = parseFloat(val) || 0
-    const r = parseFloat(form.carat_rate) || 0
-    setForm(f => ({
-      ...f,
-      quantity: val,
-      total_amount: q > 0 && r > 0 ? (q * r).toFixed(2) : (val === '' ? '' : f.total_amount)
-    }))
-  }
-
-  function handleCaratRateChange(val) {
-    const q = parseFloat(form.quantity) || 0
-    const r = parseFloat(val) || 0
-    setForm(f => ({
-      ...f,
-      carat_rate: val,
-      total_amount: q > 0 && r > 0 ? (q * r).toFixed(2) : (val === '' ? '' : f.total_amount)
-    }))
-  }
-
   function handleSupplierChange(id) {
     setF('supplier_id', id)
     const p = parties.find(x => x.id === id)
     if (p && !form.due_date) {
-      // Suggest due date based on supplier default term days
       const d = new Date(form.selling_date || today)
       d.setDate(d.getDate() + (p.default_term_days || 90))
       setF('due_date', d.toISOString().split('T')[0])
@@ -68,17 +72,48 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
     setF('due_date', base.toISOString().split('T')[0])
   }
 
+  // Line helpers
+  function setLineField(idx, key, val) {
+    setLines(prev => prev.map((line, i) => {
+      if (i !== idx) return line
+      const updated = { ...line, [key]: val }
+      if (key === 'quantity' || key === 'carat_rate') {
+        const q = parseFloat(key === 'quantity' ? val : updated.quantity) || 0
+        const r = parseFloat(key === 'carat_rate' ? val : updated.carat_rate) || 0
+        updated.amount = q > 0 && r > 0 ? (q * r).toFixed(2) : (val === '' ? '' : updated.amount)
+      }
+      return updated
+    }))
+  }
+
+  function addLine() {
+    setLines(prev => [...prev, emptyLine(prev.length + 1)])
+  }
+
+  function removeLine(idx) {
+    if (lines.length <= 1) return
+    setLines(prev => prev.filter((_, i) => i !== idx).map((l, i) => ({ ...l, line_no: i + 1 })))
+  }
+
+  // Calculate totals across all lines
+  const totalQuantity = lines.reduce((s, l) => s + (parseFloat(l.quantity) || 0), 0)
+  const totalAmount = lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0)
+
   const selectedSupplier = parties.find(p => p.id === form.supplier_id)
   const daysLeftInfo = form.due_date ? getDaysLeft(form.due_date, today) : null
-  const numericTotal = parseFloat(form.total_amount) || 0
 
   async function handleSubmit(e) {
     e.preventDefault()
-    if (!form.title.trim()) { setError('Please enter a title'); return }
+    if (!form.title.trim()) { setError('Please enter a title / description'); return }
     if (!form.supplier_id) { setError('Please select a supplier'); return }
-    if (!form.quantity || parseFloat(form.quantity) <= 0) { setError('Please enter a valid quantity'); return }
-    if (!form.carat_rate || parseFloat(form.carat_rate) < 0) { setError('Please enter a valid carat rate'); return }
     if (!form.due_date) { setError('Please select a due date'); return }
+
+    // Validate that at least one line has valid quantity and rate
+    const validLines = lines.filter(l => parseFloat(l.quantity) > 0 && parseFloat(l.carat_rate) >= 0)
+    if (validLines.length === 0) {
+      setError('Please add at least one item/lot with a valid quantity (carats) and carat rate')
+      return
+    }
 
     setSaving(true)
     setError('')
@@ -87,13 +122,21 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
         ...existingSelling,
         title: form.title.trim(),
         supplier_id: form.supplier_id,
-        quantity: parseFloat(form.quantity),
-        carat_rate: parseFloat(form.carat_rate),
-        total_amount: numericTotal,
         selling_date: form.selling_date,
         due_date: form.due_date,
-        payment_type: form.payment_type,
+        lines: validLines.map((l, i) => ({
+          line_no: i + 1,
+          description: l.description.trim(),
+          quantity: parseFloat(l.quantity),
+          carat_rate: parseFloat(l.carat_rate),
+          amount: parseFloat(l.amount) || Number((parseFloat(l.quantity) * parseFloat(l.carat_rate)).toFixed(2)),
+        })),
+        quantity: totalQuantity,
+        carat_rate: totalQuantity > 0 ? Number((totalAmount / totalQuantity).toFixed(2)) : 0,
+        total_amount: totalAmount,
         remarks: form.remarks.trim() || null,
+        payment_status: existingSelling?.payment_status || 'unpaid',
+        payment_type: existingSelling?.payment_type || null,
         payment_id: existingSelling?.payment_id || null,
       }, isEdit)
 
@@ -107,10 +150,10 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal modal-lg" onClick={e => e.stopPropagation()}>
+      <div className="modal modal-xl" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <div className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span>{isEdit ? '✏️ Edit Selling' : '💎 Add Selling'}</span>
+            <span>{isEdit ? '✏️ Edit Selling Order' : '💎 Record New Sale'}</span>
           </div>
           <button className="modal-close" onClick={onClose}>✕</button>
         </div>
@@ -126,104 +169,44 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
         )}
 
         <form onSubmit={handleSubmit}>
-          {/* Title */}
-          <div className="form-group">
-            <label className="form-label">Title / Description *</label>
-            <input
-              className="input"
-              value={form.title}
-              onChange={e => setF('title', e.target.value)}
-              placeholder="e.g. CVD Round Polished 0.50-0.70 ct Lot #101"
-              required
-              autoFocus
-            />
-          </div>
-
-          {/* Supplier */}
-          <div className="form-group">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <label className="form-label">Supplier *</label>
-              {selectedSupplier && (
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  Default credit: {selectedSupplier.default_term_days || 90} days
-                </span>
-              )}
-            </div>
-            <select
-              className="select"
-              value={form.supplier_id}
-              onChange={e => handleSupplierChange(e.target.value)}
-              required
-            >
-              <option value="">Select a supplier…</option>
-              {parties.map(p => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Quantity & Carat Rate */}
+          {/* Header Details: Title & Supplier */}
           <div className="form-row">
             <div className="form-group">
-              <label className="form-label">Quantity (Carats) *</label>
+              <label className="form-label">Sale Title / Lot Description *</label>
               <input
-                className="input font-mono"
-                type="number"
-                step="0.001"
-                min="0.001"
-                value={form.quantity}
-                onChange={e => handleQuantityChange(e.target.value)}
-                placeholder="e.g. 15.420"
+                className="input"
+                value={form.title}
+                onChange={e => setF('title', e.target.value)}
+                placeholder="e.g. CVD Round Polished 0.50-0.70 ct Lot #101"
                 required
+                autoFocus
               />
             </div>
             <div className="form-group">
-              <label className="form-label">Carat Rate (₹ / ct) *</label>
-              <input
-                className="input font-mono"
-                type="number"
-                step="0.01"
-                min="0"
-                value={form.carat_rate}
-                onChange={e => handleCaratRateChange(e.target.value)}
-                placeholder="e.g. 42000"
-                required
-              />
-            </div>
-          </div>
-
-          {/* Automatic Calculated Total Amount */}
-          <div style={{
-            background: 'var(--blue-bg)',
-            border: '1.5px solid var(--blue-border)',
-            borderRadius: 'var(--radius-md)',
-            padding: '12px 16px',
-            marginBottom: 16,
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center'
-          }}>
-            <div>
-              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: 'var(--accent)', letterSpacing: '0.05em' }}>
-                ⚡ Automatically Calculated Total
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-                {parseFloat(form.quantity) > 0 && parseFloat(form.carat_rate) > 0 ? (
-                  `${Number(form.quantity).toFixed(3)} ct × ₹${Number(form.carat_rate).toLocaleString('en-IN')}`
-                ) : (
-                  'Enter quantity and carat rate above'
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <label className="form-label">Supplier *</label>
+                {selectedSupplier && (
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    Credit: {selectedSupplier.default_term_days || 90}d
+                  </span>
                 )}
               </div>
-            </div>
-            <div style={{ textAlign: 'right' }}>
-              <div style={{ fontSize: 22, fontWeight: 900, color: 'var(--accent)', fontFamily: 'JetBrains Mono, monospace' }}>
-                {formatINR(numericTotal)}
-              </div>
+              <select
+                className="select"
+                value={form.supplier_id}
+                onChange={e => handleSupplierChange(e.target.value)}
+                required
+              >
+                <option value="">Select a supplier…</option>
+                {parties.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
             </div>
           </div>
 
           {/* Dates: Selling Date & Due Date */}
-          <div className="form-row">
+          <div className="form-row" style={{ marginBottom: 18 }}>
             <div className="form-group">
               <label className="form-label">Selling Date *</label>
               <input
@@ -259,112 +242,157 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
             </div>
           </div>
 
-          {/* Switch: Collected Amount vs Adjusted to Balance */}
-          <div className="form-group" style={{ marginTop: 8 }}>
-            <label className="form-label" style={{ marginBottom: 8 }}>
-              Settlement Method Switch *
-            </label>
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: '1fr 1fr',
-              gap: 10,
-              padding: 4,
-              background: 'var(--bg-elevated)',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--border)'
-            }}>
+          {/* Multiple Quantities / Items Table */}
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary)' }}>
+                💎 Items / Quantity Lots ({lines.length})
+              </div>
               <button
                 type="button"
-                onClick={() => setF('payment_type', 'collected')}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 8,
-                  padding: '10px 14px',
-                  borderRadius: 'var(--radius-sm)',
-                  border: form.payment_type === 'collected' ? '1.5px solid var(--accent)' : '1px solid transparent',
-                  background: form.payment_type === 'collected' ? 'white' : 'transparent',
-                  color: form.payment_type === 'collected' ? 'var(--accent)' : 'var(--text-muted)',
-                  fontWeight: form.payment_type === 'collected' ? 700 : 500,
-                  fontSize: 13,
-                  cursor: 'pointer',
-                  boxShadow: form.payment_type === 'collected' ? 'var(--shadow-sm)' : 'none',
-                  transition: 'all 0.15s ease'
-                }}
+                className="btn btn-ghost btn-sm"
+                onClick={addLine}
+                style={{ color: 'var(--accent)', fontWeight: 600, padding: '4px 10px' }}
               >
-                <span>💵</span>
-                <span>Collected Amount</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setF('payment_type', 'adjusted')}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 8,
-                  padding: '10px 14px',
-                  borderRadius: 'var(--radius-sm)',
-                  border: form.payment_type === 'adjusted' ? '1.5px solid var(--green)' : '1px solid transparent',
-                  background: form.payment_type === 'adjusted' ? 'white' : 'transparent',
-                  color: form.payment_type === 'adjusted' ? 'var(--green-light)' : 'var(--text-muted)',
-                  fontWeight: form.payment_type === 'adjusted' ? 700 : 500,
-                  fontSize: 13,
-                  cursor: 'pointer',
-                  boxShadow: form.payment_type === 'adjusted' ? 'var(--shadow-sm)' : 'none',
-                  transition: 'all 0.15s ease'
-                }}
-              >
-                <span>⚖️</span>
-                <span>Adjusted to Balance</span>
+                + Add Another Item
               </button>
             </div>
 
-            {/* Explanation card based on switch selection */}
-            {form.payment_type === 'adjusted' ? (
-              <div style={{
-                marginTop: 10,
-                background: 'var(--green-bg)',
-                border: '1px solid var(--green-border)',
-                borderRadius: 'var(--radius-md)',
-                padding: '10px 14px',
-                fontSize: 12.5,
-                color: 'var(--green-light)',
-                lineHeight: 1.5
-              }}>
-                <div style={{ fontWeight: 700, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span>⚖️ Auto Payment Entry Enabled</span>
-                </div>
-                When saved, a payment transaction of <strong>{formatINR(numericTotal)}</strong> will be automatically entered into the <strong>Payments Register</strong> for <strong>{selectedSupplier?.name || 'this supplier'}</strong>. This will settle their open bills via FIFO and reduce what you owe them.
+            <div style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <thead>
+                  <tr style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border)' }}>
+                    <th style={{ width: 36, textAlign: 'center', padding: '8px 6px' }}>#</th>
+                    <th style={{ padding: '8px 10px' }}>Lot / Description (Optional)</th>
+                    <th style={{ width: 140, padding: '8px 10px' }}>Weight (ct) *</th>
+                    <th style={{ width: 150, padding: '8px 10px' }}>Carat Rate (₹) *</th>
+                    <th style={{ width: 160, textAlign: 'right', padding: '8px 12px' }}>Line Total (₹)</th>
+                    <th style={{ width: 44, textAlign: 'center', padding: '8px 6px' }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lines.map((l, idx) => (
+                    <tr key={idx} style={{ borderBottom: idx < lines.length - 1 ? '1px solid var(--border)' : 'none', background: 'white' }}>
+                      <td style={{ textAlign: 'center', fontWeight: 600, color: 'var(--text-muted)' }}>
+                        {idx + 1}
+                      </td>
+                      <td style={{ padding: '6px 8px' }}>
+                        <input
+                          className="input"
+                          style={{ padding: '6px 10px', fontSize: 13 }}
+                          placeholder={`Item #${idx + 1} description`}
+                          value={l.description}
+                          onChange={e => setLineField(idx, 'description', e.target.value)}
+                        />
+                      </td>
+                      <td style={{ padding: '6px 8px' }}>
+                        <input
+                          className="input font-mono"
+                          type="number"
+                          step="0.001"
+                          min="0.001"
+                          style={{ padding: '6px 10px', fontSize: 13 }}
+                          placeholder="e.g. 10.500"
+                          value={l.quantity}
+                          onChange={e => setLineField(idx, 'quantity', e.target.value)}
+                          required
+                        />
+                      </td>
+                      <td style={{ padding: '6px 8px' }}>
+                        <input
+                          className="input font-mono"
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          style={{ padding: '6px 10px', fontSize: 13 }}
+                          placeholder="e.g. 42000"
+                          value={l.carat_rate}
+                          onChange={e => setLineField(idx, 'carat_rate', e.target.value)}
+                          required
+                        />
+                      </td>
+                      <td style={{ textAlign: 'right', padding: '6px 12px', fontWeight: 700, fontFamily: 'JetBrains Mono, monospace', color: 'var(--green-light)', fontSize: 14 }}>
+                        {formatINR(parseFloat(l.amount) || 0)}
+                      </td>
+                      <td style={{ textAlign: 'center', padding: '6px 4px' }}>
+                        {lines.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => removeLine(idx)}
+                            title="Remove lot line"
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              cursor: 'pointer',
+                              color: 'var(--red)',
+                              fontSize: 14,
+                              padding: 4,
+                            }}
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Live Automatic Calculation Card */}
+          <div style={{
+            background: 'var(--blue-bg)',
+            border: '1.5px solid var(--blue-border)',
+            borderRadius: 'var(--radius-md)',
+            padding: '14px 18px',
+            marginBottom: 18,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 12
+          }}>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: 'var(--accent)', letterSpacing: '0.05em' }}>
+                ⚡ Auto-Calculated Sale Summary
               </div>
-            ) : (
-              <div style={{
-                marginTop: 10,
-                background: 'var(--bg-card-hover)',
-                border: '1px solid var(--border)',
-                borderRadius: 'var(--radius-md)',
-                padding: '10px 14px',
-                fontSize: 12.5,
-                color: 'var(--text-muted)',
-                lineHeight: 1.5
-              }}>
-                <div style={{ fontWeight: 600, marginBottom: 2 }}>💵 Collected directly from buyer</div>
-                Payment is received in cash/bank from the counterparty. Supplier balance and ledger will remain untouched.
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 3 }}>
+                <strong>{lines.length} {lines.length === 1 ? 'lot' : 'lots'}</strong> · Total Weight: <strong style={{ color: 'var(--accent)' }}>{formatWeight(totalQuantity)}</strong>
               </div>
-            )}
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>
+                Total Sale Amount
+              </div>
+              <div style={{ fontSize: 24, fontWeight: 900, color: 'var(--accent)', fontFamily: 'JetBrains Mono, monospace' }}>
+                {formatINR(totalAmount)}
+              </div>
+            </div>
           </div>
 
           {/* Remarks */}
-          <div className="form-group">
-            <label className="form-label">Remarks / Notes</label>
+          <div className="form-group" style={{ marginBottom: 20 }}>
+            <label className="form-label">Remarks / Buyer Notes</label>
             <input
               className="input"
               value={form.remarks}
               onChange={e => setF('remarks', e.target.value)}
               placeholder="Optional notes, buyer name, packet reference, etc."
             />
+          </div>
+
+          {/* Notice info on payment */}
+          <div style={{
+            background: 'var(--bg-elevated)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+            padding: '10px 14px',
+            fontSize: 12,
+            color: 'var(--text-muted)',
+            marginBottom: 20
+          }}>
+            💡 <strong>Payment Settlement</strong>: Saved as Unpaid. You can mark it as <strong>Collected</strong> or <strong>Adjusted to Supplier Balance</strong> at any time using the switch in the Selling Portal.
           </div>
 
           {/* Modal Footer */}
@@ -376,9 +404,9 @@ export default function SellingForm({ selling: existingSelling, onClose, onSaved
               type="submit"
               className="btn btn-primary"
               disabled={saving}
-              style={{ minWidth: 140, justifyContent: 'center' }}
+              style={{ minWidth: 140, justifyContent: 'center', fontWeight: 700 }}
             >
-              {saving ? 'Saving…' : (isEdit ? 'Update Selling' : '💎 Add Selling')}
+              {saving ? 'Saving…' : (isEdit ? 'Update Sale' : '💎 Save Selling Order')}
             </button>
           </div>
         </form>

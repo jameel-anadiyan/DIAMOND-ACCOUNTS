@@ -4,6 +4,13 @@ const LOCAL_STORAGE_KEY = 'da_selling_records_v1'
 
 let cachedModeId = null
 
+function generateId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return 'sel_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9)
+}
+
 export async function getSellingAdjustmentModeId() {
   if (cachedModeId) return cachedModeId
   try {
@@ -37,24 +44,28 @@ export async function getSellingAdjustmentModeId() {
 
 /**
  * Fetch all selling records.
- * Checks for public.selling_records first; if table does not exist,
- * falls back cleanly to Supabase audit_log + localStorage sync.
  */
 export async function getSellingRecords() {
-  // First check active parties to always have current names & balance
-  const [{ data: parties }, { data: bsData }] = await Promise.all([
-    supabase.from('parties').select('id, name').order('name'),
-    supabase.rpc('fn_bill_status', { p_as_of: new Date().toISOString().split('T')[0] }).catch(() => ({ data: [] }))
-  ])
+  let partyMap = {}
+  let balanceMap = {}
 
-  const partyMap = {}
-  ;(parties || []).forEach(p => { partyMap[p.id] = p.name })
+  try {
+    const { data: parties } = await supabase.from('parties').select('id, name').order('name')
+    ;(parties || []).forEach(p => { partyMap[p.id] = p.name })
+  } catch (err) {
+    console.warn('Failed to load parties in sellingService:', err)
+  }
 
-  // Party balance map
-  const balanceMap = {}
-  ;(bsData || []).forEach(b => {
-    balanceMap[b.party_id] = (balanceMap[b.party_id] || 0) + Number(b.balance || 0)
-  })
+  try {
+    const res = await supabase.rpc('fn_bill_status', { p_as_of: new Date().toISOString().split('T')[0] })
+    if (res && res.data) {
+      res.data.forEach(b => {
+        balanceMap[b.party_id] = (balanceMap[b.party_id] || 0) + Number(b.balance || 0)
+      })
+    }
+  } catch {
+    // If rpc call has error, continue gracefully
+  }
 
   // Try direct selling_records table in Supabase
   try {
@@ -64,15 +75,22 @@ export async function getSellingRecords() {
       .order('selling_date', { ascending: false })
 
     if (!error && Array.isArray(data)) {
-      return data.map(item => ({
-        ...item,
-        supplier_name: item.supplier?.name || partyMap[item.supplier_id] || 'Unknown Supplier',
-        supplier_balance: balanceMap[item.supplier_id] || 0,
-        is_payment_active: item.payment && !item.payment.is_cancelled,
-      }))
+      return data.map(item => {
+        const rawLines = item.lines || [
+          { line_no: 1, quantity: Number(item.quantity) || 0, carat_rate: Number(item.carat_rate) || 0, amount: Number(item.total_amount) || 0 }
+        ]
+        return {
+          ...item,
+          supplier_name: item.supplier?.name || partyMap[item.supplier_id] || 'Unknown Supplier',
+          supplier_balance: balanceMap[item.supplier_id] || 0,
+          lines: rawLines,
+          payment_status: item.payment_status || (item.payment_type ? 'paid' : 'unpaid'),
+          payment_type: item.payment_type || null,
+        }
+      })
     }
   } catch {
-    // Continue to cloud audit_log + localStorage fallback
+    // Table not ready yet, continue to audit_log + localStorage
   }
 
   // Fallback: load from Supabase audit_log for table_name = 'selling_portal'
@@ -86,7 +104,6 @@ export async function getSellingRecords() {
 
     if (auditRows && auditRows.length > 0) {
       const byRowId = new Map()
-      // Because audit_log is ordered latest-first:
       for (const row of auditRows) {
         const rowId = row.row_id || row.new_data?.id
         if (!rowId || byRowId.has(rowId)) continue
@@ -118,13 +135,20 @@ export async function getSellingRecords() {
     if (r && r.id && !combinedMap.has(r.id)) combinedMap.set(r.id, r)
   }
 
-  const merged = Array.from(combinedMap.values()).map(item => ({
-    ...item,
-    supplier_name: partyMap[item.supplier_id] || item.supplier_name || 'Unknown Supplier',
-    supplier_balance: balanceMap[item.supplier_id] || 0,
-  }))
+  const merged = Array.from(combinedMap.values()).map(item => {
+    const rawLines = item.lines || [
+      { line_no: 1, quantity: Number(item.quantity) || 0, carat_rate: Number(item.carat_rate) || 0, amount: Number(item.total_amount) || 0 }
+    ]
+    return {
+      ...item,
+      supplier_name: partyMap[item.supplier_id] || item.supplier_name || 'Unknown Supplier',
+      supplier_balance: balanceMap[item.supplier_id] || 0,
+      lines: rawLines,
+      payment_status: item.payment_status || (item.payment_type ? 'paid' : 'unpaid'),
+      payment_type: item.payment_type || null,
+    }
+  })
 
-  // Save updated merged to localStorage for fast initial render
   try {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(merged))
   } catch {}
@@ -134,77 +158,71 @@ export async function getSellingRecords() {
 
 /**
  * Save (create or update) a selling record.
- * Handles entering / updating / deleting payment transactions in party_payments.
+ * Initially recorded without payment selection (unpaid).
  */
 export async function saveSellingRecord(record, isEdit = false) {
-  const totalAmount = Number((Number(record.quantity) * Number(record.carat_rate)).toFixed(2))
   const today = new Date().toISOString().split('T')[0]
   const sellingDate = record.selling_date || today
 
-  let paymentId = record.payment_id || null
+  // Process multiple lines / lots
+  const lines = (record.lines && record.lines.length > 0)
+    ? record.lines.map((l, idx) => {
+        const q = parseFloat(l.quantity) || 0
+        const r = parseFloat(l.carat_rate) || 0
+        const amt = parseFloat(l.amount) || Number((q * r).toFixed(2))
+        return {
+          line_no: idx + 1,
+          description: l.description || '',
+          quantity: q,
+          carat_rate: r,
+          amount: amt,
+        }
+      })
+    : [
+        {
+          line_no: 1,
+          description: '',
+          quantity: parseFloat(record.quantity) || 0,
+          carat_rate: parseFloat(record.carat_rate) || 0,
+          amount: parseFloat(record.total_amount) || 0,
+        }
+      ]
 
-  // 1. Manage payment transaction in party_payments based on payment_type switch
-  if (record.payment_type === 'adjusted') {
-    const modeId = await getSellingAdjustmentModeId()
-    const paymentPayload = {
-      party_id: record.supplier_id,
-      payment_date: sellingDate,
-      amount: totalAmount,
-      mode_id: modeId,
-      reference_no: `Sale: ${record.title || 'Diamond Sale'}`,
-      remarks: `Selling balance adjustment: ${record.title} (${Number(record.quantity).toFixed(3)} ct @ ₹${Number(record.carat_rate).toLocaleString('en-IN')})`,
-    }
-
-    if (paymentId) {
-      // Update existing payment
-      const { error: updErr } = await supabase
-        .from('party_payments')
-        .update(paymentPayload)
-        .eq('id', paymentId)
-      
-      if (updErr) {
-        console.warn('Could not update payment, re-inserting:', updErr)
-        // If updating failed (e.g. was deleted from payments table), insert fresh
-        const { data: newPay } = await supabase
-          .from('party_payments')
-          .insert(paymentPayload)
-          .select('id')
-          .single()
-        if (newPay) paymentId = newPay.id
-      }
-    } else {
-      // Insert new payment transaction for this supplier
-      const { data: newPay, error: insErr } = await supabase
-        .from('party_payments')
-        .insert(paymentPayload)
-        .select('id')
-        .single()
-      
-      if (insErr) {
-        console.error('Failed to create payment transaction:', insErr)
-        throw new Error('Failed to record payment transaction in supplier balance: ' + insErr.message)
-      }
-      if (newPay) paymentId = newPay.id
-    }
-  } else if (record.payment_type === 'collected') {
-    // If switched to 'collected' and previously had a linked payment, delete it
-    if (paymentId) {
-      await supabase.from('party_payments').delete().eq('id', paymentId)
-      paymentId = null
-    }
-  }
+  const totalQuantity = lines.reduce((s, l) => s + l.quantity, 0)
+  const totalAmount = lines.reduce((s, l) => s + l.amount, 0)
+  const primaryCaratRate = totalQuantity > 0 ? Number((totalAmount / totalQuantity).toFixed(2)) : 0
 
   const finalRecord = {
     ...record,
-    id: record.id || crypto.randomUUID(),
+    id: record.id || generateId(),
+    lines,
+    quantity: totalQuantity,
+    carat_rate: primaryCaratRate,
     total_amount: totalAmount,
     selling_date: sellingDate,
-    payment_id: paymentId,
+    payment_status: record.payment_status || 'unpaid',
+    payment_type: record.payment_type || null,
+    payment_id: record.payment_id || null,
     updated_at: new Date().toISOString(),
     created_at: record.created_at || new Date().toISOString(),
   }
 
-  // 2. Persist selling record
+  // If already paid and adjusted, update payment transaction amount if modified
+  if (finalRecord.payment_status === 'paid' && finalRecord.payment_type === 'adjusted' && finalRecord.payment_id) {
+    try {
+      await supabase.from('party_payments').update({
+        party_id: finalRecord.supplier_id,
+        payment_date: finalRecord.selling_date,
+        amount: finalRecord.total_amount,
+        reference_no: `Sale: ${finalRecord.title || 'Diamond Sale'}`,
+        remarks: `Selling balance adjustment: ${finalRecord.title} (${Number(finalRecord.quantity).toFixed(3)} ct)`,
+      }).eq('id', finalRecord.payment_id)
+    } catch (err) {
+      console.warn('Failed to update linked payment:', err)
+    }
+  }
+
+  // Persist to selling_records table if exists
   let savedInTable = false
   try {
     const tablePayload = {
@@ -221,10 +239,7 @@ export async function saveSellingRecord(record, isEdit = false) {
       remarks: finalRecord.remarks || null,
     }
 
-    const { error: tblErr } = await supabase
-      .from('selling_records')
-      .upsert(tablePayload)
-    
+    const { error: tblErr } = await supabase.from('selling_records').upsert(tablePayload)
     if (!tblErr) savedInTable = true
   } catch {
     savedInTable = false
@@ -261,10 +276,136 @@ export async function saveSellingRecord(record, isEdit = false) {
 }
 
 /**
+ * Mark a selling record as PAID.
+ * Asks / settles as either 'collected' or 'adjusted'.
+ * When 'adjusted', creates a payment entry in party_payments for that supplier.
+ */
+export async function markSellingAsPaid(record, paymentType) {
+  const today = new Date().toISOString().split('T')[0]
+  let paymentId = record.payment_id || null
+
+  if (paymentType === 'adjusted') {
+    const modeId = await getSellingAdjustmentModeId()
+    const paymentPayload = {
+      party_id: record.supplier_id,
+      payment_date: record.selling_date || today,
+      amount: Number(record.total_amount),
+      mode_id: modeId,
+      reference_no: `Sale: ${record.title || 'Diamond Sale'}`,
+      remarks: `Selling balance adjustment: ${record.title} (${Number(record.quantity).toFixed(3)} ct)`,
+    }
+
+    if (paymentId) {
+      const { error: updErr } = await supabase.from('party_payments').update(paymentPayload).eq('id', paymentId)
+      if (updErr) {
+        const { data: newPay } = await supabase.from('party_payments').insert(paymentPayload).select('id').single()
+        if (newPay) paymentId = newPay.id
+      }
+    } else {
+      const { data: newPay, error: insErr } = await supabase.from('party_payments').insert(paymentPayload).select('id').single()
+      if (insErr) {
+        throw new Error('Failed to record payment transaction in supplier balance: ' + insErr.message)
+      }
+      if (newPay) paymentId = newPay.id
+    }
+  } else if (paymentType === 'collected') {
+    // If was previously adjusted and had paymentId, remove it
+    if (paymentId) {
+      try {
+        await supabase.from('party_payments').delete().eq('id', paymentId)
+      } catch {}
+      paymentId = null
+    }
+  }
+
+  const updatedRecord = {
+    ...record,
+    payment_status: 'paid',
+    payment_type: paymentType,
+    payment_id: paymentId,
+    updated_at: new Date().toISOString(),
+  }
+
+  // Update in audit_log / selling_records table / localStorage
+  try {
+    await supabase.from('audit_log').insert({
+      table_name: 'selling_portal',
+      row_id: updatedRecord.id,
+      action: 'UPDATE',
+      new_data: updatedRecord,
+    })
+  } catch {}
+
+  try {
+    await supabase.from('selling_records').update({
+      payment_type: paymentType,
+      payment_id: paymentId,
+    }).eq('id', updatedRecord.id)
+  } catch {}
+
+  try {
+    const local = localStorage.getItem(LOCAL_STORAGE_KEY)
+    if (local) {
+      const list = JSON.parse(local).map(x => x.id === updatedRecord.id ? updatedRecord : x)
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(list))
+    }
+  } catch {}
+
+  return updatedRecord
+}
+
+/**
+ * Mark a selling record as UNPAID.
+ * Removes any linked payment transaction from party_payments.
+ */
+export async function markSellingAsUnpaid(record) {
+  if (record.payment_id) {
+    try {
+      await supabase.from('party_payments').delete().eq('id', record.payment_id)
+    } catch (err) {
+      console.warn('Failed to delete payment transaction:', err)
+    }
+  }
+
+  const updatedRecord = {
+    ...record,
+    payment_status: 'unpaid',
+    payment_type: null,
+    payment_id: null,
+    updated_at: new Date().toISOString(),
+  }
+
+  try {
+    await supabase.from('audit_log').insert({
+      table_name: 'selling_portal',
+      row_id: updatedRecord.id,
+      action: 'UPDATE',
+      new_data: updatedRecord,
+    })
+  } catch {}
+
+  try {
+    await supabase.from('selling_records').update({
+      payment_type: null,
+      payment_id: null,
+    }).eq('id', updatedRecord.id)
+  } catch {}
+
+  try {
+    const local = localStorage.getItem(LOCAL_STORAGE_KEY)
+    if (local) {
+      const list = JSON.parse(local).map(x => x.id === updatedRecord.id ? updatedRecord : x)
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(list))
+    }
+  } catch {}
+
+  return updatedRecord
+}
+
+/**
  * Delete a selling record and remove any linked payment transaction from party_payments.
  */
 export async function deleteSellingRecord(record) {
-  // 1. Delete linked payment if any
   if (record.payment_id) {
     try {
       await supabase.from('party_payments').delete().eq('id', record.payment_id)
@@ -273,12 +414,10 @@ export async function deleteSellingRecord(record) {
     }
   }
 
-  // 2. Delete from selling_records table if it exists
   try {
     await supabase.from('selling_records').delete().eq('id', record.id)
   } catch {}
 
-  // 3. Mark deleted in audit_log
   try {
     await supabase.from('audit_log').insert({
       table_name: 'selling_portal',
@@ -288,7 +427,6 @@ export async function deleteSellingRecord(record) {
     })
   } catch {}
 
-  // 4. Remove from localStorage
   try {
     const local = localStorage.getItem(LOCAL_STORAGE_KEY)
     if (local) {
@@ -298,15 +436,4 @@ export async function deleteSellingRecord(record) {
   } catch {}
 
   return true
-}
-
-/**
- * Quick toggle between 'collected' and 'adjusted' directly from table.
- */
-export async function toggleSettlementMode(record) {
-  const newType = record.payment_type === 'adjusted' ? 'collected' : 'adjusted'
-  return await saveSellingRecord({
-    ...record,
-    payment_type: newType,
-  }, true)
 }
